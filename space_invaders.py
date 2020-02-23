@@ -1,7 +1,7 @@
 # Space Invaders
 # By Adam Kilbourne-Quirk 2020-02-22
 
-import os, sys, random, math
+import os, sys, random, math, time
 import turtle
 
 # Required by MacOS to show the window
@@ -18,6 +18,7 @@ turtle.tracer(0, 0)
 wn = turtle.Screen()
 wn.title("Space Invaders")
 wn.bgcolor("black")
+wn.colormode(255)
 
 class Sprite(turtle.Turtle):
 	def __init__(self, shape, color, start_x, start_y, start_hdg):
@@ -35,10 +36,10 @@ class Sprite(turtle.Turtle):
 		# bounce = 2 * wall - approach
 		self.setheading(-self.heading() + 2 * wall_angle) 
 
-	def move(self, border_size=350):
+	def move(self):
 		# boundaries
-		b1 = border_size - self.size
-		b2 = -border_size + self.size
+		b1 = game.border_size - self.size
+		b2 = -game.border_size + self.size
 
 		# x-speed reflect
 		if self.xcor() > b1 or self.xcor() < b2:
@@ -57,6 +58,18 @@ class Sprite(turtle.Turtle):
 		y2 = other.ycor()
 		return ((x2 - x1)**2 + (y2 - y1)**2)**0.5
 
+	def bearing(self, x1, y1, x2, y2):
+		return (math.atan2(y2 - y1, x2 - x1))*180/math.pi
+
+	def brgError(self, brg, hdg):
+		# must have range +/- 180
+		if self.heading() < 180:
+			hdg = self.heading()
+		else:
+			hdg = self.heading() - 360
+
+		return brg - hdg # TODO: fix this to avoid discontinuity at 180
+
 	def isCollided(self, other):
 		if self.distance(other) < self.size + other.size:
 			return True
@@ -70,6 +83,8 @@ class Player(Sprite):
 		self.speed = 4
 		self.lives = 3
 		self.setheading(start_hdg)
+		self.maxFwdSpeed = 15
+		self.maxRevSpeed = 5
 		self.maxTurnSpeed = 22.5
 
 	def turn_left(self):
@@ -80,11 +95,14 @@ class Player(Sprite):
 
 	def accel(self):
 		self.speed += 1
-		self.speed = min(self.speed, 30)
+		self.speed = min(self.speed, self.maxFwdSpeed)
 
 	def decel(self):
 		self.speed -= 1
-		self.speed = max(self.speed, 0)
+		self.speed = max(self.speed, -self.maxRevSpeed)
+
+	def respawn(self):
+		self.goto(0, 0)
 
 class Enemy(Sprite):
 	def __init__(self, shape, color, start_x=0, start_y=0, start_hdg=0):
@@ -92,6 +110,8 @@ class Enemy(Sprite):
 		self.speed = 4
 		self.guidance = 0
 		self.maxTurnSpeed = 10
+		self.randomSteps = 0
+		self.randomTurn = random.randint(-self.maxTurnSpeed, self.maxTurnSpeed)
 
 	def autopilot(self, player):
 		# manoeuvers Enemy based on guidance
@@ -101,20 +121,43 @@ class Enemy(Sprite):
 		# 3: Pro-Nav. Tries to aim ahead of player.
 		# 4: Avoidance. Moves directly away from player.
 
-		hdgToPlayer = (math.atan2(player.ycor() - self.ycor(), player.xcor() - self.xcor()))*180/math.pi
-		hdgError = 0
-		#print(hdgToPlayer, hdgError)
 		if self.guidance == 1:
-			self.lt(random.randint(-45, 45)) # don't turn too sharply
+			self.randomSteps += 1
+			if self.randomSteps > 20:
+				self.randomSteps = 0
+				self.randomTurn = random.randint(-self.maxTurnSpeed, self.maxTurnSpeed)
+			self.lt(self.randomTurn) # don't turn too sharply
+
 		elif self.guidance == 2:
-			self.lt(self.maxTurnSpeed * hdgError/180)
+			brg = self.bearing(self.xcor(), self.ycor(), player.xcor(), player.ycor())
+			brgError = self.brgError(brg, self.heading())
+
+			command = 0.05 * brgError
+			self.lt(max(min(self.maxTurnSpeed, command), -self.maxTurnSpeed))
+
 		elif self.guidance == 3:
-			pass
-		elif self.guidance == 4:
+			# PN
+			# a = N*V*LOS
+			N = player.speed/max(self.speed, 1)
+			px = N * player.xcor() + math.cos(math.pi/180 * player.heading()) * self.distance(player)
+			py = N * player.ycor() + math.sin(math.pi/180 * player.heading()) * self.distance(player)
+			brg = self.bearing(self.xcor(), self.ycor(), px, py)
+			brgError = self.brgError(brg, self.heading())
+
+			command = 0.5 * brgError
+			self.lt(max(min(self.maxTurnSpeed, command), -self.maxTurnSpeed))
+
 			pass
 
-	def reset(self, border_size):
-		b = border_size - self.size
+		elif self.guidance == 4:
+			brg = self.bearing(self.xcor(), self.ycor(), player.xcor(), player.ycor())
+			brgError = self.brgError(brg, self.heading())
+
+			command = 0.05 * (brgError - 180) % 360
+			self.rt(max(min(self.maxTurnSpeed, command), -self.maxTurnSpeed))
+
+	def reset(self):
+		b = game.border_size - self.size
 		self.goto(random.randint(-b, b),random.randint(-b, b))
 		self.setheading(random.randint(0, 360))
 
@@ -133,11 +176,11 @@ class Bullet(Sprite):
 			self.goto(player.xcor(), player.ycor())
 
 
-	def move(self, border_size):
+	def move(self):
 		if not self.status:
 			return
 		# boundaries
-		b = border_size - self.speed
+		b = game.border_size - self.speed
 
 		# OOB
 		if not (-b < self.xcor() < b) or not (-b < self.ycor() < b):
@@ -146,25 +189,6 @@ class Bullet(Sprite):
 
 		self.fd(self.speed)
 
-
-class Wall(Sprite):
-	def __init__(self, color, x1, y1, x2, y2):
-		# draw a line from (x1, y1) to (x2, y2)
-		self.pen = turtle.Turtle()
-		self.pen.speed(0)
-		self.pen.color("white")
-		self.pen.penup()
-		self.pen.setposition(x1, y1)
-		self.pen.pendown()
-		self.pen.pensize(3)
-		
-		distance = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-		angle = math.atan2((y2 - y1), (x2 - x1))
-
-		self.pen.lt(angle)
-		self.pen.fd(distance)
-		self.pen.ht()
-
 class Game():
 	def __init__(self):
 		self.sprites = []
@@ -172,8 +196,9 @@ class Game():
 		self.score = 0
 		self.state = "playing"
 		self.pen = turtle.Turtle()
+		self.text = turtle.Turtle()
 
-	def draw_border(self, border_size=350):
+	def drawBorder(self, border_size=350):
 		self.border_size = border_size
 
 		self.pen.speed(0)
@@ -187,24 +212,33 @@ class Game():
 			self.pen.lt(90)
 		self.pen.ht()
 
+	def showMessage(self, s):
+		self.text.speed(0)
+		self.text.color("white")
+		self.text.penup()
+		self.text.goto(-300, 310)
+		self.text.write(s, font=("Arial", 16, "normal"))
+		self.text.clear()
+
 # Game Init
 border_size = 350
 game = Game()
-game.draw_border(border_size)
+game.drawBorder(border_size)
 
 # Sprites
-
 player = Player("triangle", "blue", 0, -250, 90)
 bullet = Bullet("triangle", "yellow", 1e6, 1e6, 0)
 game.sprites.append(player)
 game.sprites.append(bullet)
 
+color_dict = {0:"red", 1:"purple", 2:"orange red", 3:"green", 4:"brown"}
 for i in range(5):
-	e = Enemy("square", "red")
-	e.reset(border_size)
+	e = Enemy("square", color_dict[i % 5])
+	e.reset()
+	e.speed = 2 + i/2
+	e.guidance = 2 + i%2
+
 	game.sprites.append(e)
-
-
 
 # Keyboard Bindings
 turtle.listen()
@@ -212,23 +246,25 @@ turtle.onkey(player.turn_left, "Left")
 turtle.onkey(player.turn_right, "Right")
 turtle.onkey(player.accel, "Up")
 turtle.onkey(player.decel, "Down")
-turtle.onkey(bullet.fire, "w")
-
+turtle.onkey(player.respawn, "r")
+turtle.onkey(bullet.fire, "z")
 
 print("Press Ctrl-C to Finish.")
 
 while True:
 	turtle.update()
 	try:
-		for sprite in game.sprites:
-			sprite.move(border_size)
+		b = game.border_size
+		for i, sprite in enumerate(game.sprites):
+			sprite.move()
+			#game.showMessage(player.heading())
 			if isinstance(sprite, Enemy):
 				sprite.autopilot(player)
 				if player.isCollided(sprite):
 					player.lives -= 1
-					sprite.reset(border_size)
-				if bullet.isCollided(sprite):
-					sprite.reset(border_size)
+					sprite.reset()
+				if bullet.isCollided(sprite) or not (-b < sprite.xcor() < b) or not (-b < sprite.ycor() < b):
+					sprite.reset()
 
 	except KeyboardInterrupt:
 		print("\nThanks For Playing.")
