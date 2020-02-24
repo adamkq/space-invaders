@@ -24,7 +24,7 @@ wn.colormode(255)
 class Sprite(turtle.Turtle):
 	def __init__(self, shape, color, start_x, start_y, start_hdg):
 		turtle.Turtle.__init__(self, shape = shape)
-		self.speed(3)
+		self.speed(0)
 		self.color(color)
 		self.penup()
 
@@ -111,6 +111,7 @@ class Player(Sprite):
 				bullet = Bullet("triangle", "yellow", self.xcor(), self.ycor(), fragment, self.speed)
 				bullet.fire()
 			self.bombs -= 1
+			game.show_score()
 
 	def turn_left(self):
 		self.lt(self.max_turn_speed)
@@ -126,16 +127,11 @@ class Player(Sprite):
 		self.speed -= 1
 		self.speed = max(self.speed, -self.max_rev_speed)
 
-	def respawn(self):
-		self.penup()
-		self.clear()
-		self.goto(self.start_loc[0], self.start_loc[1])
-		self.setheading(self.start_loc[2])
-
 	def invuln_on(self, seconds):
-		self.time_since_invuln = time.time()
+		if not self.is_invuln:
+			self.time_since_invuln = time.time()
 		self.is_invuln = True
-		self.time_invuln = seconds
+		self.time_invuln += seconds
 
 	def invuln_off(self):
 		flash_interval = 0.2
@@ -143,14 +139,21 @@ class Player(Sprite):
 			return
 		elif time.time() - self.time_since_invuln > self.time_invuln:
 			self.is_invuln = False
+			self.time_invuln = 0
 			self.color("blue")
 		elif (time.time() - self.time_since_invuln) % flash_interval > flash_interval/2:
 			self.color("black")
 		else:
 			self.color("blue")
 
+	def respawn(self):
+		self.penup()
+		self.clear()
+		self.goto(self.start_loc[0], self.start_loc[1])
+		self.setheading(self.start_loc[2])
+
 class Enemy(Sprite):
-	def __init__(self, shape, color="red", start_x=0, start_y=0, start_hdg=0):
+	def __init__(self, shape="square", color="red", start_x=0, start_y=0, start_hdg=0):
 		Sprite.__init__(self, shape, color, start_x, start_y, start_hdg)
 		self.aim_pt = turtle.Turtle()
 		self.aim_pt.color("white")
@@ -191,7 +194,7 @@ class Enemy(Sprite):
 			ay = py
 
 		elif self.guidance == 3:
-			N = player.speed/max(self.speed, 1) * min(self.distance(px, py), game.border_size/2)
+			N = player.speed/max(self.speed, 1) * self.distance(px, py)
 			ax = px + math.cos(math.pi/180 * player.heading()) * N
 			ay = py + math.sin(math.pi/180 * player.heading()) * N
 
@@ -209,21 +212,45 @@ class Enemy(Sprite):
 		self.lt(max(min(self.max_turn_speed, command), -self.max_turn_speed))
 
 	def draw_aim_pt(self, ax, ay):
-		self.aim_pt.penup()
 		self.aim_pt.goto(ax, ay)
 		self.aim_pt.clear()
 		self.aim_pt.dot()
 
-	def reset(self):
-		b = game.border_size - self.size
+	def respawn(self):
+		self.penup()
+		self.clear()
 		while True:
-			ax = random.randint(-b, b)
-			ay = random.randint(-b, b)
-			if player.distance(ax, ay) > 100:
+			b = game.border_size - self.size
+			x = random.randint(-b, b)
+			y = random.randint(-b, b)
+			if player.distance(x, y) > game.border_size/4:
 				break
-		self.goto(ax, ay)
+		self.goto(x, y)
 		self.setheading(random.randint(0, 360))
 
+class Prize(Sprite):
+	def __init__(self, shape="circle", color="white", start_x=0, start_y=0, start_hdg=0):
+		Sprite.__init__(self, shape, color, start_x, start_y, start_hdg)
+		self.goto(start_x, start_y)
+		self.speed = 0
+		self.time_since_respawn = float("-inf")
+		self.respawn_interval = 10
+
+	def award(self):
+		game.increment_lives(1)
+		player.invuln_on(1)
+		self.respawn()
+
+	def respawn(self):
+		self.penup()
+		self.clear()
+		while True:
+			b = game.border_size - self.size
+			x = random.randint(-b, b)
+			y = random.randint(-b, b)
+			if player.distance(x, y) > game.border_size/4:
+				break
+		self.goto(x, y)
 
 class Bullet(Sprite):
 	def __init__(self, shape, color, start_x, start_y, start_hdg, player_speed=0):
@@ -254,7 +281,8 @@ class Bullet(Sprite):
 
 class Game():
 	def __init__(self):
-		self.actors = []
+		self.non_enemies = []
+		self.enemies = []
 		self.bullets = []
 		self.score = self.highScore = 0
 		self.show_aim_pts = True
@@ -293,10 +321,9 @@ class Game():
 		player.lives = player.start_lives
 		self.score = 0
 		player.bombs = player.start_bombs
-		player.respawn()
-		for sprite in game.actors:
-			if isinstance(sprite, Enemy):
-				sprite.reset()
+		sprites = game.non_enemies + game.enemies
+		for sprite in sprites:
+			sprite.respawn()
 		game.show_score()
 
 	def show_score(self):
@@ -311,7 +338,6 @@ class Game():
 	def exit_game(self):
 		turtle.bye()
 
-
 # Game Init
 border_size = 350
 game = Game()
@@ -319,16 +345,18 @@ game.draw_border(border_size)
 
 # Sprites
 player = Player("triangle", "blue", 0, -250, 90)
-game.actors.append(player)
+prize = Prize()
+game.non_enemies.append(player)
+game.non_enemies.append(prize)
 numEnemies = 5
 
 color_dict = {0:"green", 1:"purple", 2:"orange red", 3:"red", 4:"brown"}
 for i in range(numEnemies):
-	e = Enemy("square")
+	e = Enemy()
 	e.guidance = i % 5
 	e.color(color_dict[e.guidance])
 	e.speed = 2 + i / 2
-	game.actors.append(e)
+	game.enemies.append(e)
 
 # Reset
 game.reset_game()
@@ -352,24 +380,27 @@ mem.append(process.memory_info().rss)
 while True:
 	try:
 		turtle.update()
-		sprites = game.actors + game.bullets
+		sprites = game.non_enemies + game.enemies + game.bullets
 		for sprite in sprites:
 			sprite.move()
 			if isinstance(sprite, Player):
 				player.invuln_off()
+				if player.is_collided(prize):
+					prize.award()
 			if isinstance(sprite, Enemy):
+				# if collided with player or bullet or OOB, respawn
 				sprite.autopilot(player)
 				if player.is_collided(sprite) and not player.is_invuln:
 					game.increment_lives(-1)
-					sprite.reset()
+					sprite.respawn()
 					player.invuln_on(3)
 				for bullet in game.bullets:
 					if bullet.is_collided(sprite):
 						game.increment_score(100)
-						sprite.reset()
+						sprite.respawn()
 				b = game.border_size
 				if not (-b < sprite.xcor() < b) or not (-b < sprite.ycor() < b):
-					sprite.reset()
+					sprite.respawn()
 
 	except KeyboardInterrupt:
 		break
