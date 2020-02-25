@@ -1,9 +1,15 @@
 # space-invaders
-A spacewar-style game in Python/Turtle. Based on online tutorials.
+A spacewar-style game in Python/Turtle.
 
 ## Controls
 * Arrow Keys: Maneuver
 * R: reset player
-* Z: fire cannon
+* Z: fire bullet
+* X: fire bouncy ball
 * Space: bomb
+
+* P: toggle enemy movement
 * Q: exit
+
+
+
