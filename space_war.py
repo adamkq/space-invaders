@@ -206,6 +206,11 @@ class Enemy(Actor):
 		self.bx = game.border_size_x - self.size
 		self.by = game.border_size_y - self.size
 
+		self.target = player
+
+		# target a random actor, for giggles
+		if game.options["all_enemies_aim_rand"]:
+			self.target = random.choice(game.get_actors())
 		self.guidance = 0
 		self.random_steps = 0
 		self.ax_rand = random.randint(-bx, bx)
@@ -227,7 +232,7 @@ class Enemy(Actor):
 			self.scattered = True
 			self.set_guidance(5)
 
-	def autopilot(self, player):
+	def autopilot(self):
 		'''
 		Pick a pt to navigate to based on guidance
 		0: Patrol. Does not maneuver or respond to player.
@@ -244,11 +249,14 @@ class Enemy(Actor):
 		if self.scattered and time.time() - self.time_since_scatter > self.time_scatter:
 			self.set_guidance(self.start_guidance)
 			self.scattered = False
-		px = player.xcor()
-		py = player.ycor()
+		px = self.target.xcor()
+		py = self.target.ycor()
 		ax = self.xcor()
 		ay = self.ycor()
 
+		# object is self-targeting, or does not maneuver
+		if px - ax == 0 and py - ay == 0 or not 0 < self.guidance < 6:
+			return
 
 		if self.guidance == 1:
 			self.random_steps = (self.random_steps + 1) % 50
@@ -289,13 +297,13 @@ class Enemy(Actor):
 			b = a/2cos(C), C != +/- 90
 			'''
 			p_dist = self.distance(px, py)
-			N = player.speed/max(self.speed, 1)
+			N = self.target.speed/max(self.speed, 1)
 			aim_dist = 0
 
 			# if player is not moving, aim directly at it
 			if abs(N) > 0:
 				c0 = -(p_dist ** 2)
-				c1 = 2 * p_dist * math.cos(math.pi / 180 * player.brg_error(ax, ay))
+				c1 = 2 * p_dist * math.cos(math.pi / 180 * self.target.brg_error(ax, ay))
 				c2 = 1/(N**2) - 1
 
 				# N == +/-1; edge case
@@ -308,11 +316,11 @@ class Enemy(Actor):
 					b1 = (-c1 + temp**0.5) / (2 * c2)
 					b2 = (-c1 - temp**0.5) / (2 * c2)
 					aim_dist = max(min(b1, b2), 0)
-				if player.speed < 0:
+				if self.target.speed < 0:
 					aim_dist *= -1
 
-			ax = px + math.cos(math.pi / 180 * player.heading()) * aim_dist
-			ay = py + math.sin(math.pi / 180 * player.heading()) * aim_dist
+			ax = px + math.cos(math.pi / 180 * self.target.heading()) * aim_dist
+			ay = py + math.sin(math.pi / 180 * self.target.heading()) * aim_dist
 
 		elif self.guidance == 4:
 			'''
@@ -342,16 +350,26 @@ class Enemy(Actor):
 		self.aim_pt.clear()
 		self.aim_pt.dot()
 
+	def respawn(self):
+		if game.options["all_enemies_aim_rand"]:
+			self.target = random.choice(game.get_actors())
+		super().respawn()
+
 class Prize(Actor):
 	def __init__(self, shape="circle", color="white", start_x=0, start_y=0):
 		Actor.__init__(self, shape, color, start_x, start_y)
 		self.time_since_respawn = float("-inf")
 		self.respawn_interval = 10
 
+	def scatter_enemies(self, t):
+		for e in game.get_actors():
+			if isinstance(e, Enemy):
+				e.scatter(t)
+
 	def award(self):
 		player.increment_lives(1)
-		player.invuln_on(3)
-		game.scatter_enemies(3)
+		player.invuln_on(10)
+		self.scatter_enemies(10)
 		self.respawn()
 
 class Bullet(Sprite):
@@ -430,11 +448,11 @@ class Wall(Sprite):
 		return abs(dy * px - dx * py + self.x2 * self.y1 - self.y2 * self.x1) / math.sqrt(dx ** 2 + dy ** 2)
 
 	def is_collided(self, actor):
-		s = (actor.size + abs(actor.speed))/2
+		s = actor.size + abs(actor.speed)/2
 
 		# avoid phenomenon where player sticks to the wall and oscillates
 		if self.bounce_mode == 1:
-			s *= 1.5
+			s *= 1.3
 		x_max = max(self.x1, self.x2)
 		x_min = min(self.x1, self.x2)
 		y_max = max(self.y1, self.y2)
@@ -444,6 +462,7 @@ class Wall(Sprite):
 
 		# actor is in bounding box of wall
 		if (x_min - s < px < x_max + s) and (y_min - s < py < y_max + s):
+			# actor is actually touching wall
 			if self.dist_point_line(px, py) < s:
 				return True
 		return False
@@ -519,7 +538,7 @@ class Wall(Sprite):
 		else:
 			self.bounce_standard(actor)
 
-class Game():
+class SpaceWar():
 	def __init__(self, border_size_x, border_size_y, options):
 		self.options = options
 		self.actors = []
@@ -553,10 +572,16 @@ class Game():
 				# if collided with player or bullet or OOB, respawn
 				if self.options["enemies_can_move"]:
 					actor.move()
-					actor.autopilot(player)
+					actor.autopilot()
 				if player.is_collided(actor):
-					player.increment_lives(-1)
-					actor.respawn()
+					if actor.scattered:
+						self.increment_score(actor)
+						actor.respawn()
+					else:
+						if not player.is_invuln:
+							player.increment_lives(-1)
+							actor.respawn()
+
 			for wall in game.walls:
 				if wall.is_collided(actor):
 					wall.bounce(actor)
@@ -603,21 +628,29 @@ class Game():
 		self.bkgnd.color("white")
 		bx = self.border_size_x
 		by = self.border_size_y
-		for _ in range(500):
+		for _ in range(int(bx/4)):
 			self.bkgnd.penup()
 			self.bkgnd.goto(random.randint(-bx, bx), random.randint(-by, by))
 			self.bkgnd.dot(random.randint(1,3))
 
+	def make_enemies(self, num_enemies):
+		for i in range(num_enemies):
+			e = Enemy()
+			if len(self.options["allowed_enemy_guidance_modes"]) > 0:
+				e.set_guidance(random.choice(self.options["allowed_enemy_guidance_modes"]))
+			else:
+				e.set_guidance(i % 6)
+			e.speed = min(2 + i / 2, 5)
+			self.actors.append(e)
+
 	def toggle_enemy_movement(self):
 		self.options["enemies_can_move"] ^= 1
 
-	def scatter_enemies(self, t):
-		for e in game.actors:
-			if isinstance(e, Enemy):
-				e.scatter(t)
+	def get_actors(self):
+		return self.actors
 
-	def increment_score(self, enemy, bullet):
-		if bullet.bounces > 1:
+	def increment_score(self, enemy, bullet=None):
+		if bullet and bullet.bounces > 1:
 			score = 10
 		else:
 			score = 100
@@ -681,16 +714,68 @@ wn.bgcolor("black")
 wn.colormode(255)
 
 # Game Init options and walls
-options = {
+
+options_trivial = {
 	"player_can_die":False,
-	"show_aim_pts":True,
-	"all_enemies_speed_match":True,
-	"num_enemies":6,
 	"all_walls_bounce_mode":5,
-	"all_enemies_guidance":-1,
-	"enemies_can_move":True
+	"allowed_enemy_guidance_modes":[0],
+	"all_enemies_speed_match":False,
+	"all_enemies_aim_rand":True,
+	"enemies_can_move":False,
+	"show_aim_pts":True
 }
-game = Game(800, 450, options)
+
+options_easy = {
+	"player_can_die":True,
+	"all_walls_bounce_mode":4,
+	"allowed_enemy_guidance_modes":[0, 1, 4],
+	"all_enemies_speed_match":False,
+	"all_enemies_aim_rand":False,
+	"enemies_can_move":True,
+	"show_aim_pts":True
+}
+
+options_standard = {
+	"player_can_die":True,
+	"all_walls_bounce_mode":-1,
+	"allowed_enemy_guidance_modes":[],
+	"all_enemies_speed_match":False,
+	"all_enemies_aim_rand":False,
+	"enemies_can_move":True,
+	"show_aim_pts":False
+}
+
+options_hard = {
+	"player_can_die":True,
+	"all_walls_bounce_mode":1,
+	"allowed_enemy_guidance_modes":[2, 3, 4, 5],
+	"all_enemies_speed_match":False,
+	"all_enemies_aim_rand":False,
+	"enemies_can_move":True,
+	"show_aim_pts":False
+}
+
+options_diabolical = {
+	"player_can_die":True,
+	"all_walls_bounce_mode":6,
+	"allowed_enemy_guidance_modes":[2, 3],
+	"all_enemies_speed_match":True,
+	"all_enemies_aim_rand":False,
+	"enemies_can_move":True,
+	"show_aim_pts":False
+}
+
+options_test = {
+	"player_can_die": False,
+	"all_walls_bounce_mode": -1,
+	"allowed_enemy_guidance_modes": [2, 4],
+	"all_enemies_speed_match": True,
+	"all_enemies_aim_rand": True,
+	"enemies_can_move": True,
+	"show_aim_pts": True
+}
+
+game = SpaceWar(800, 450, options_standard)
 bx = game.border_size_x
 by = game.border_size_y
 wall1 = Wall(-bx/2, -by/2, -bx/2, by/2, 6)
@@ -705,19 +790,11 @@ game.draw_walls()
 game.show_controls()
 
 # Actor Sprites
-player = Player("triangle", "cyan", 0, -250, 90)
+player = Player("triangle", "cyan", 0, -100, 90)
 prize = Prize()
 game.actors.append(player)
 game.actors.append(prize)
-
-for i in range(game.options["num_enemies"]):
-	e = Enemy()
-	if game.options["all_enemies_guidance"] >= 0:
-		e.set_guidance(game.options["all_enemies_guidance"])
-	else:
-		e.set_guidance(i % 6)
-	e.speed = min(2 + i / 2, 5)
-	game.actors.append(e)
+game.make_enemies(12)
 
 # Reset
 game.reset_game()
@@ -740,15 +817,14 @@ mem = []
 process = psutil.Process(os.getpid())
 mem.append(process.memory_info().rss)
 
-while True:
+while game.active:
 	t1 = time.time()
+	game.update()
 	turtle.update()
 	t2 = time.time()
-	game.maf_frame_rate(t2 - t1)
-	if not game.active:
-		break
-	game.update()
 
+print("\nStats:")
+print("High Score: {}".format(game.highScore))
 mem.append(process.memory_info().rss)
-print("\nMemory Usage")
-print("Start: {}\nEnd:   {}".format(mem[0], mem[1]))
+print("\nMemory Usage (MB):")
+print("Start: {}\nEnd:   {}".format(round(mem[0]/1e6, 1), round(mem[1]/1e6, 1)))
