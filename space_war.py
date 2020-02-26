@@ -1,7 +1,7 @@
 # Space Invaders
 # By Adam Kilbourne-Quirk 2020-02-22
 
-import os, sys, time, psutil
+import os, sys, time, psutil, queue
 import math, random
 import turtle
 
@@ -26,14 +26,22 @@ class Sprite(turtle.Turtle):
 		y1 = self.ycor()
 		return (math.atan2(y - y1, x - x1))*180/math.pi
 
-	def brg_error(self, brg):
-		# must have range +/- 180
-		if self.heading() < 180:
-			hdg = self.heading()
+	def brg_error(self, x, y):
+		'''
+		use the cross product to a) avoid discontinuity at +/- 180 and b) take the sign/pointing direction into account
+		sin(C) = cross(a, b) / [mag(a) * mag(b)]
+		'''
+		x1 = math.cos(math.pi / 180 * self.heading())
+		y1 = math.sin(math.pi / 180 * self.heading())
+		x2 = x - self.xcor()
+		y2 = y - self.ycor()
+		dist = self.distance(x, y)
+		if dist == 0:
+			sin_C = 0
 		else:
-			hdg = self.heading() - 360
+			sin_C = (x1 * y2 - x2 * y1) / dist
 
-		return brg - hdg # TODO: fix this to avoid discontinuity at 180
+		return math.asin(sin_C) * 180 / math.pi
 
 	def is_collided(self, other):
 		if self.distance(other.xcor(), other.ycor()) < self.size + other.size:
@@ -69,6 +77,22 @@ class Actor(Sprite):
 				break
 		self.goto(x, y)
 		self.setheading(random.randint(0, 360))
+
+	def closing_speed(self, actor):
+		'''
+		This function requires a speed attribute, which is why it isn't in the Sprite class
+		v_close = dot(v_rel, d_rel)/mag(d_rel)
+		'''
+		v1x = self.speed * math.cos(math.pi / 180 * self.heading())
+		v1y = self.speed * math.sin(math.pi / 180 * self.heading())
+		v2x = actor.speed * math.cos(math.pi / 180 * actor.heading())
+		v2y = actor.speed * math.sin(math.pi / 180 * actor.heading())
+		dx = actor.xcor() - self.xcor()
+		dy = actor.ycor() - self.ycor()
+		vx = v2x - v1x
+		vy = v2y - v1y
+		return (vx * dx + vy * dy)/self.distance(actor.xcor(), actor.ycor())
+
 
 class Player(Actor):
 	def __init__(self, shape, color, start_x, start_y, start_hdg, speed=4, max_turn_speed=22.5):
@@ -130,18 +154,20 @@ class Player(Actor):
 		self.speed -= 1
 		self.speed = max(self.speed, -self.max_rev_speed)
 
-	def increment_lives(self, lives):
-		self.lives += lives
+	def increment_lives(self, lives, set_invuln=True):
+		if lives > 0 or (lives < 0 and not self.is_invuln) or not set_invuln:
+			self.lives += lives
 		if self.lives < 1 and game.options["player_can_die"]:
 			game.reset_game()
-		self.invuln_on(3)
+		if set_invuln:
+			self.invuln_on(3)
 		game.show_score()
 
 	def invuln_on(self, seconds):
 		if not self.is_invuln:
 			self.time_since_invuln = time.time()
 		self.is_invuln = True
-		self.time_invuln += seconds
+		self.time_invuln = seconds
 
 	def invuln_off(self):
 		flash_interval = 0.2
@@ -197,7 +223,7 @@ class Enemy(Actor):
 		ax = self.xcor()
 		ay = self.ycor()
 		if game.options["all_enemies_speed_match"]:
-			self.speed = player.speed
+			self.speed = abs(player.speed)
 
 		if self.guidance == 1:
 			self.random_steps = (self.random_steps + 1) % 50
@@ -230,25 +256,24 @@ class Enemy(Actor):
 			c0 = -a**2
 			c1 = 2acos(C)
 			c2 = 1/N**2 - 1
+			
+			When N = 1, c = b, and the equation becomes linear:
+			b = a/2cos(C), C != +/- 90
 			'''
 			p_dist = self.distance(px, py)
 			N = player.speed/max(self.speed, 1)
+			aim_dist = 0
 
-			# check if player is moving
-			# if not, aim directly at it
-			if abs(N) < 1e-6:
-				ax = px
-				ay = py
-			# if yes, pre-empt it
-			else:
-				C = player.brg_error(player.bearing(ax, ay))
+			# if player is not moving, aim directly at it
+			if abs(N) > 0:
+				C = player.brg_error(ax, ay)
 				c0 = -(p_dist ** 2)
 				c1 = 2 * p_dist * math.cos(math.pi / 180 * C)
 				c2 = 1/(N**2) - 1
 
-
-				if c2 == 0 or not (-90 < C < 90):
-					aim_dist = N * p_dist
+				# N == +/-1; edge case
+				if abs(c2) < 1e-6:
+					aim_dist = -c0 / c1
 				else:
 					temp = c1**2 - 4 * c2 * c0
 					# avoid complex numbers
@@ -256,27 +281,25 @@ class Enemy(Actor):
 					b1 = (-c1 + temp**0.5) / (2 * c2)
 					b2 = (-c1 - temp**0.5) / (2 * c2)
 					aim_dist = max(min(b1, b2), 0)
+				if player.speed < 0:
+					aim_dist *= -1
 
-				ax = px + math.cos(math.pi / 180 * player.heading()) * aim_dist
-				ay = py + math.sin(math.pi / 180 * player.heading()) * aim_dist
+			ax = px + math.cos(math.pi / 180 * player.heading()) * aim_dist
+			ay = py + math.sin(math.pi / 180 * player.heading()) * aim_dist
 
 		elif self.guidance == 4:
+			'''
+			move towards opposite side of the area
+			'''
 			ax = -px
 			ay = -py
 
 		elif self.guidance == 5:
 			'''
-			pick corner by quadrant
+			move directly away from player
 			'''
-			corners = [(-self.bx, -self.by), (self.bx, -self.by), (self.bx, self.by), (-self.bx, self.by)]
-			corner_max = corners[1]
-
-			for corner in corners:
-				if player.distance(corner[0], corner[1]) > player.distance(corner_max[0], corner_max[1]):
-					corner_max = corner
-			ax = corner_max[0]
-			ay = corner_max[1]
-
+			ax = 2 * ax - px
+			ay = 2 * ay - py
 		else:
 			return
 
@@ -284,8 +307,7 @@ class Enemy(Actor):
 		ay = max(min(self.by, ay), -self.by)
 		if game.options["show_aim_pts"]:
 			self.draw_aim_pt(ax, ay)
-		brg = self.bearing(ax, ay)
-		command = 0.5 * self.brg_error(brg)
+		command = 0.5 * self.brg_error(ax, ay)
 		self.lt(max(min(self.max_turn_speed, command), -self.max_turn_speed))
 
 	def draw_aim_pt(self, ax, ay):
@@ -310,7 +332,9 @@ class Bullet(Sprite):
 		self.shapesize(stretch_wid = 0.3, stretch_len = 0.4, outline=None)
 		self.speed = speed
 		self.bounces = bounces
-		self.size = 1
+		self.size = 5
+		self.max_lifetime = 20
+		self.spawn_time = time.time()
 
 	def fire(self):
 		self.goto(player.xcor(), player.ycor())
@@ -321,7 +345,7 @@ class Bullet(Sprite):
 		bx = game.border_size_x
 		by = game.border_size_y
 
-		if not (-bx < self.xcor() < bx) or not (-by < self.ycor() < by):
+		if time.time() - self.spawn_time > self.max_lifetime or not (-bx < self.xcor() < bx) or not (-by < self.ycor() < by):
 			self.__del__()
 
 		self.fd(self.speed)
@@ -378,7 +402,11 @@ class Wall(Sprite):
 		return abs(dy * px - dx * py + self.x2 * self.y1 - self.y2 * self.x1) / math.sqrt(dx ** 2 + dy ** 2)
 
 	def is_collided(self, actor):
-		s = actor.size + actor.speed/actor.size
+		s = (actor.size + abs(actor.speed))/2
+
+		# avoid phenomenon where player sticks to the wall and oscillates
+		if self.bounce_mode == 1:
+			s *= 1.5
 		x_max = max(self.x1, self.x2)
 		x_min = min(self.x1, self.x2)
 		y_max = max(self.y1, self.y2)
@@ -399,7 +427,7 @@ class Wall(Sprite):
 		'''
 		bounce modes:
 		0: standard: 2 * wall - approach. Block all sprites.
-		1: slow down: divide player speed by 2
+		1: slow down: standard, but divide player speed by 2
 		2: semi-random: standard, but with a less predictable heading
 		3: allow actors through
 		4: allow bullets through
@@ -410,7 +438,7 @@ class Wall(Sprite):
 		if self.bounce_mode == 1:
 			self.bounce_standard(actor)
 			if isinstance(actor, Player):
-				actor.speed = max(actor.speed * 0.75, 4)
+				actor.speed *= 0.5
 		elif self.bounce_mode == 2:
 			self.bounce_standard(actor)
 			bounds = min(60, abs(int(actor.heading() - self.angle)))
@@ -481,6 +509,17 @@ class Game():
 		self.text1.ht()
 		self.text2.ht()
 		self.time_delta = 1/30
+		self.frame_time_queue = queue.Queue(5)
+
+	def maf_frame_rate(self, td):
+		'''
+		Determines the frame rate using a moving average filter to smooth out irregular execution.
+		'''
+		if self.frame_time_queue.full():
+			td_oldest = self.frame_time_queue.get()
+		else:
+			td_oldest = self.time_delta
+		self.time_delta += (td - td_oldest) / self.frame_time_queue.maxsize
 
 	def make_border(self):
 		bx = self.border_size_x
@@ -498,10 +537,10 @@ class Game():
 			wall.draw()
 
 	def toggle_enemy_movement(self):
-		self.enemies_can_move ^= 1
+		self.options["enemies_can_move"] ^= 1
 
 	def increment_score(self, enemy, bullet):
-		if bullet.bounces > 0:
+		if bullet.bounces > 1:
 			score = 10
 		else:
 			score = 100
@@ -541,7 +580,7 @@ class Game():
 		s1 = "Respawn: {0:<5}\t Cannon: {1:<5}\t Bouncy Ball: {2:<5}\t Bomb: {3:<5}\t".format("R", "Z", "X", "Space")
 		s2 = "Toggle Enemy Move: {0:<5}\t Quit: {1:<5}".format("P", "Q")
 		s = s1 + s2
-		self.text2.goto(-self.border_size_x * 0.5 + 50, -self.border_size_y - 20)
+		self.text2.goto(-self.border_size_x * 0.5 + 50, -self.border_size_y - 25)
 		self.text2.clear()
 		self.text2.write(s, font=("Arial", 14, "normal"))
 
@@ -568,23 +607,24 @@ wn.colormode(255)
 options = {
 	"player_can_die":False,
 	"show_aim_pts":True,
-	"all_enemies_speed_match":False,
+	"all_enemies_speed_match":True,
 	"num_enemies":6,
-	"all_walls_bounce_mode":-1,
-	"all_enemies_guidance":-1,
-
+	"all_walls_bounce_mode":2,
+	"all_enemies_guidance":5,
+	"enemies_can_move":True
 }
 game = Game(800, 450, options)
 bx = game.border_size_x
 by = game.border_size_y
 wall1 = Wall(-bx/2, -by/2, -bx/2, by/2, 6)
 wall2 = Wall(bx/2, -by/2, bx/2, by/2, 4)
-wall3 = Wall(-bx/2, by/2, bx/2, by/2, 3)
-wall4 = Wall(-bx/2, -by/2, bx/2, -by/2, 3)
+wall3 = Wall(-bx/3, by/2, bx/3, by/2, 3)
+wall4 = Wall(-bx/3, -by/2, bx/3, -by/2, 3)
 
 game.make_border()
 game.walls.extend([wall1, wall2, wall3, wall4])
 game.draw_walls()
+game.show_controls()
 
 # Actor Sprites
 player = Player("triangle", "cyan", 0, -250, 90)
@@ -603,7 +643,6 @@ for i in range(game.options["num_enemies"]):
 
 # Reset
 game.reset_game()
-game.show_controls()
 
 # Keyboard Bindings
 turtle.listen()
@@ -627,7 +666,7 @@ while True:
 	t1 = time.time()
 	turtle.update()
 	t2 = time.time()
-	game.time_delta = t2 - t1
+	game.maf_frame_rate(t2 - t1)
 	if not game.active:
 		break
 	# actors
@@ -639,10 +678,10 @@ while True:
 				prize.award()
 		if isinstance(actor, Enemy):
 			# if collided with player or bullet or OOB, respawn
-			if game.enemies_can_move:
+			if game.options["enemies_can_move"]:
 				actor.move()
 				actor.autopilot(player)
-			if player.is_collided(actor) and not player.is_invuln:
+			if player.is_collided(actor):
 				player.increment_lives(-1)
 				actor.respawn()
 		for wall in game.walls:
