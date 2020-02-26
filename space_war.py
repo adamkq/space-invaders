@@ -93,7 +93,6 @@ class Actor(Sprite):
 		vy = v2y - v1y
 		return (vx * dx + vy * dy)/self.distance(actor.xcor(), actor.ycor())
 
-
 class Player(Actor):
 	def __init__(self, shape, color, start_x, start_y, start_hdg, speed=4, max_turn_speed=22.5):
 		Actor.__init__(self, shape, color, start_x, start_y, start_hdg, speed, max_turn_speed)
@@ -109,10 +108,19 @@ class Player(Actor):
 		self.rof = 4 # Rate of Fire; bullets per second
 		self.bullet_speed = 20
 		self.bullet_bounces = 50
-		self.time_since_fire = time.time()
+		self.time_since_fire = float('-inf')
 		self.is_invuln = False
-		self.time_since_invuln = time.time()
+		self.time_since_invuln = float('-inf')
 		self.time_invuln = 0
+
+	def autopilot(self):
+		'''
+		Will implement in pygame version of this game. Does the following:
+		- If number of lives are below a threshold, navigate to the prize.
+		- If above threshold, hunt down enemies
+		- Avoid collision with hotwalls and enemies.
+		- If enemy collision imminent, or average distance to enemies is low, use a bomb
+		'''
 
 	def fire_bullet(self):
 		if time.time() - self.time_since_fire > 1/max(self.rof, 1e-6):
@@ -191,7 +199,7 @@ class Player(Actor):
 class Enemy(Actor):
 	def __init__(self, shape="square", color="red", start_x=0, start_y=0, start_hdg=0, speed=4, max_turn_speed=5):
 		Actor.__init__(self, shape, color, start_x, start_y, start_hdg, speed, max_turn_speed)
-		self.color_dict = {0: "green", 1: "lightgreen", 2: "orange red", 3: "red", 4: "brown", 5: "purple"}
+		self.color_dict = {0: "green", 1: "lightgreen", 2: "orange red", 3: "red", 4: "brown", 5: "blue"}
 		self.aim_pt = turtle.Turtle()
 		self.aim_pt.color("white")
 		self.aim_pt.ht()
@@ -203,10 +211,21 @@ class Enemy(Actor):
 		self.ax_rand = random.randint(-bx, bx)
 		self.ay_rand = random.randint(-by, by)
 		self.dist_prev = 0
+		self.scattered = False
+		self.time_since_scatter = float('-inf')
+		self.time_scatter = 0
 
 	def set_guidance(self, guidance):
 		self.guidance = guidance
 		self.color(self.color_dict[guidance % len(self.color_dict)])
+
+	def scatter(self, t):
+		self.time_scatter = t
+		self.time_since_scatter = time.time()
+		if not self.scattered:
+			self.start_guidance = self.guidance
+			self.scattered = True
+			self.set_guidance(5)
 
 	def autopilot(self, player):
 		'''
@@ -218,12 +237,18 @@ class Enemy(Actor):
 		4: Mirror. Moves to opposite side of space from player.
 		5: Avoidance. Moves away from player.
 		'''
+		if game.options["all_enemies_speed_match"]:
+			self.speed = abs(player.speed)
+
+		# stop scattering
+		if self.scattered and time.time() - self.time_since_scatter > self.time_scatter:
+			self.set_guidance(self.start_guidance)
+			self.scattered = False
 		px = player.xcor()
 		py = player.ycor()
 		ax = self.xcor()
 		ay = self.ycor()
-		if game.options["all_enemies_speed_match"]:
-			self.speed = abs(player.speed)
+
 
 		if self.guidance == 1:
 			self.random_steps = (self.random_steps + 1) % 50
@@ -234,6 +259,9 @@ class Enemy(Actor):
 			ay = self.ay_rand
 
 		elif self.guidance == 2:
+			'''
+			aim at player
+			'''
 			ax = px
 			ay = py
 
@@ -242,19 +270,19 @@ class Enemy(Actor):
 			PN aims ahead of the player to 'close the triangle' formed by the Player, Enemy, and aimpoint.
 			The aimpoint pt is a point in the direction the player is moving such that the Enemy will reach it at the 
 			same time as the player if both do not turn. Using the rule of cosines:
-			 c**2 = a**2 + b**2 -2*a*b*cos(C)
+			 c**2 = a**2 + b**2 -2ab*cos(C)
 			Substituting:
 			0. C = angle between player heading and player bearing
 			1. a = player.dist(enemy)
 			2. b = player.dist(pt)
 			3. c = enemy.dist(pt) = b / N
-			b**2/N**2 = a**2 + b**2 - 2abcos(C)
-			b**2/N**2 - b**2 + 2abcos(C) = a**2
-			b**2(1/N**2 - 1) + b(2acos(C)) - a**2 = 0
+			b**2/N**2 = a**2 + b**2 - 2ab*cos(C)
+			b**2/N**2 - b**2 + 2ab*cos(C) = a**2
+			b**2(1/N**2 - 1) + b(2a*cos(C)) - a**2 = 0
 			
 			Solve quadratic eqn with coeffs:
 			c0 = -a**2
-			c1 = 2acos(C)
+			c1 = 2a*cos(C)
 			c2 = 1/N**2 - 1
 			
 			When N = 1, c = b, and the equation becomes linear:
@@ -266,9 +294,8 @@ class Enemy(Actor):
 
 			# if player is not moving, aim directly at it
 			if abs(N) > 0:
-				C = player.brg_error(ax, ay)
 				c0 = -(p_dist ** 2)
-				c1 = 2 * p_dist * math.cos(math.pi / 180 * C)
+				c1 = 2 * p_dist * math.cos(math.pi / 180 * player.brg_error(ax, ay))
 				c2 = 1/(N**2) - 1
 
 				# N == +/-1; edge case
@@ -323,7 +350,8 @@ class Prize(Actor):
 
 	def award(self):
 		player.increment_lives(1)
-		player.invuln_on(1)
+		player.invuln_on(3)
+		game.scatter_enemies(3)
 		self.respawn()
 
 class Bullet(Sprite):
@@ -506,10 +534,44 @@ class Game():
 
 		self.text1 = turtle.Turtle()
 		self.text2 = turtle.Turtle()
+		self.bkgnd = turtle.Turtle()
 		self.text1.ht()
 		self.text2.ht()
+		self.bkgnd.ht()
 		self.time_delta = 1/30
 		self.frame_time_queue = queue.Queue(5)
+
+	def update(self):
+		# actors
+		for i, actor in enumerate(self.actors):
+			if isinstance(actor, Player):
+				actor.move()
+				actor.invuln_off()
+				if actor.is_collided(prize):
+					prize.award()
+			if isinstance(actor, Enemy):
+				# if collided with player or bullet or OOB, respawn
+				if self.options["enemies_can_move"]:
+					actor.move()
+					actor.autopilot(player)
+				if player.is_collided(actor):
+					player.increment_lives(-1)
+					actor.respawn()
+			for wall in game.walls:
+				if wall.is_collided(actor):
+					wall.bounce(actor)
+
+		# bullets
+		for i, bullet in enumerate(self.bullets):
+			bullet.move()
+			for j, actor in enumerate(self.actors):
+				if isinstance(actor, Enemy) and actor.is_collided(bullet):
+					self.increment_score(actor, bullet)
+					actor.respawn()
+			for j, wall in enumerate(self.walls):
+				if wall.is_collided(bullet):
+					wall.bounce(bullet)
+					bullet.wall_hit(wall)
 
 	def maf_frame_rate(self, td):
 		'''
@@ -536,8 +598,23 @@ class Game():
 				wall.bounce_mode = game.options["all_walls_bounce_mode"]
 			wall.draw()
 
+	def draw_background(self):
+		self.bkgnd.speed(0)
+		self.bkgnd.color("white")
+		bx = self.border_size_x
+		by = self.border_size_y
+		for _ in range(500):
+			self.bkgnd.penup()
+			self.bkgnd.goto(random.randint(-bx, bx), random.randint(-by, by))
+			self.bkgnd.dot(random.randint(1,3))
+
 	def toggle_enemy_movement(self):
 		self.options["enemies_can_move"] ^= 1
+
+	def scatter_enemies(self, t):
+		for e in game.actors:
+			if isinstance(e, Enemy):
+				e.scatter(t)
 
 	def increment_score(self, enemy, bullet):
 		if bullet.bounces > 1:
@@ -609,8 +686,8 @@ options = {
 	"show_aim_pts":True,
 	"all_enemies_speed_match":True,
 	"num_enemies":6,
-	"all_walls_bounce_mode":2,
-	"all_enemies_guidance":5,
+	"all_walls_bounce_mode":5,
+	"all_enemies_guidance":-1,
 	"enemies_can_move":True
 }
 game = Game(800, 450, options)
@@ -623,6 +700,7 @@ wall4 = Wall(-bx/3, -by/2, bx/3, -by/2, 3)
 
 game.make_border()
 game.walls.extend([wall1, wall2, wall3, wall4])
+game.draw_background()
 game.draw_walls()
 game.show_controls()
 
@@ -669,36 +747,7 @@ while True:
 	game.maf_frame_rate(t2 - t1)
 	if not game.active:
 		break
-	# actors
-	for i, actor in enumerate(game.actors):
-		if isinstance(actor, Player):
-			actor.move()
-			actor.invuln_off()
-			if actor.is_collided(prize):
-				prize.award()
-		if isinstance(actor, Enemy):
-			# if collided with player or bullet or OOB, respawn
-			if game.options["enemies_can_move"]:
-				actor.move()
-				actor.autopilot(player)
-			if player.is_collided(actor):
-				player.increment_lives(-1)
-				actor.respawn()
-		for wall in game.walls:
-			if wall.is_collided(actor):
-				wall.bounce(actor)
-
-	# bullets
-	for i, bullet in enumerate(game.bullets):
-		bullet.move()
-		for j, actor in enumerate(game.actors):
-			if isinstance(actor, Enemy) and actor.is_collided(bullet):
-				game.increment_score(actor, bullet)
-				actor.respawn()
-		for j, wall in enumerate(game.walls):
-			if wall.is_collided(bullet):
-				wall.bounce(bullet)
-				bullet.wall_hit(wall)
+	game.update()
 
 mem.append(process.memory_info().rss)
 print("\nMemory Usage")
