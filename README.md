@@ -1,4 +1,4 @@
-# space-invaders
+# Space War
 A spacewar-style game in Python/Turtle.
 
 ## Controls
