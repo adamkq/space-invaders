@@ -13,8 +13,7 @@ class Sprite(turtle.Turtle):
 
 		self.goto(start_x, start_y)
 		self.setheading(start_hdg)
-		self.size = 10 # this is the turtle default; find out how to set this
-
+		self.size = 10 # used for collisions
 
 	def distance(self, x, y):
 		x1 = self.xcor()
@@ -44,10 +43,13 @@ class Sprite(turtle.Turtle):
 		return math.asin(sin_C) * 180 / math.pi
 
 	def is_collided(self, other):
-		if self.distance(other.xcor(), other.ycor()) < self.size + other.size:
-			return True
-		else:
-			return False
+		bounds = self.size + other.size
+		# check bounding box
+		if (self.xcor() - other.xcor() < bounds) or (self.ycor() - other.ycor() < bounds):
+			# check more precisely
+			if self.distance(other.xcor(), other.ycor()) < bounds:
+				return True
+		return False
 
 class Actor(Sprite):
 	def __init__(self, shape, color, start_x, start_y, start_hdg=0, speed=0, max_turn_speed=0):
@@ -121,6 +123,7 @@ class Player(Actor):
 		- Avoid collision with hotwalls and enemies.
 		- If enemy collision imminent, or average distance to enemies is low, use a bomb
 		'''
+		pass
 
 	def fire_bullet(self):
 		if time.time() - self.time_since_fire > 1/max(self.rof, 1e-6):
@@ -213,16 +216,17 @@ class Enemy(Actor):
 			self.target = random.choice(game.get_actors())
 		self.guidance = 0
 		self.random_steps = 0
+		self.ax = self.xcor()
+		self.ay = self.ycor()
 		self.ax_rand = random.randint(-bx, bx)
 		self.ay_rand = random.randint(-by, by)
-		self.dist_prev = 0
 		self.scattered = False
 		self.time_since_scatter = float('-inf')
 		self.time_scatter = 0
 
-	def set_guidance(self, guidance):
-		self.guidance = guidance
-		self.color(self.color_dict[guidance % len(self.color_dict)])
+	def set_guidance(self, guidance_mode):
+		self.guidance = guidance_mode
+		self.color(self.color_dict[guidance_mode % len(self.color_dict)])
 
 	def scatter(self, t):
 		self.time_scatter = t
@@ -231,8 +235,9 @@ class Enemy(Actor):
 			self.start_guidance = self.guidance
 			self.scattered = True
 			self.set_guidance(5)
+			self.speed *= 0.5
 
-	def autopilot(self):
+	def update_aim_pt(self):
 		'''
 		Pick a pt to navigate to based on guidance
 		0: Patrol. Does not maneuver or respond to player.
@@ -249,14 +254,11 @@ class Enemy(Actor):
 		if self.scattered and time.time() - self.time_since_scatter > self.time_scatter:
 			self.set_guidance(self.start_guidance)
 			self.scattered = False
+			self.speed *= 2
 		px = self.target.xcor()
 		py = self.target.ycor()
 		ax = self.xcor()
 		ay = self.ycor()
-
-		# object is self-targeting, or does not maneuver
-		if px - ax == 0 and py - ay == 0 or not 0 < self.guidance < 6:
-			return
 
 		if self.guidance == 1:
 			self.random_steps = (self.random_steps + 1) % 50
@@ -265,7 +267,6 @@ class Enemy(Actor):
 				self.ay_rand = random.randint(-self.by, self.by)
 			ax = self.ax_rand
 			ay = self.ay_rand
-
 		elif self.guidance == 2:
 			'''
 			aim at player
@@ -335,14 +336,15 @@ class Enemy(Actor):
 			'''
 			ax = 2 * ax - px
 			ay = 2 * ay - py
-		else:
-			return
 
-		ax = max(min(self.bx, ax), -self.bx)
-		ay = max(min(self.by, ay), -self.by)
+		self.ax = max(min(self.bx, ax), -self.bx)
+		self.ay = max(min(self.by, ay), -self.by)
 		if game.options["show_aim_pts"]:
-			self.draw_aim_pt(ax, ay)
-		command = 0.5 * self.brg_error(ax, ay)
+			self.draw_aim_pt(self.ax, self.ay)
+
+
+	def autopilot(self):
+		command = 0.5 * self.brg_error(self.ax, self.ay)
 		self.lt(max(min(self.max_turn_speed, command), -self.max_turn_speed))
 
 	def draw_aim_pt(self, ax, ay):
@@ -368,8 +370,8 @@ class Prize(Actor):
 
 	def award(self):
 		player.increment_lives(1)
-		player.invuln_on(10)
-		self.scatter_enemies(10)
+		player.invuln_on(6)
+		self.scatter_enemies(6)
 		self.respawn()
 
 class Bullet(Sprite):
@@ -547,7 +549,6 @@ class SpaceWar():
 		self.score = self.highScore = 0
 
 		self.active = True
-		self.enemies_can_move = True
 		self.border_size_x = border_size_x
 		self.border_size_y = border_size_y
 
@@ -569,6 +570,7 @@ class SpaceWar():
 				if actor.is_collided(prize):
 					prize.award()
 			if isinstance(actor, Enemy):
+				actor.update_aim_pt()
 				# if collided with player or bullet or OOB, respawn
 				if self.options["enemies_can_move"]:
 					actor.move()
@@ -768,14 +770,20 @@ options_diabolical = {
 options_test = {
 	"player_can_die": False,
 	"all_walls_bounce_mode": -1,
-	"allowed_enemy_guidance_modes": [2, 4],
+	"allowed_enemy_guidance_modes": [1],
 	"all_enemies_speed_match": True,
-	"all_enemies_aim_rand": True,
+	"all_enemies_aim_rand": False,
 	"enemies_can_move": True,
 	"show_aim_pts": True
 }
 
-game = SpaceWar(800, 450, options_standard)
+game_options = [options_trivial, options_easy, options_standard, options_hard, options_diabolical, options_test]
+
+if len(sys.argv) > 1:
+	option = int(sys.argv[1])
+	game = SpaceWar(800, 450, game_options[option])
+else:
+	game = SpaceWar(800, 450, options_standard)
 bx = game.border_size_x
 by = game.border_size_y
 wall1 = Wall(-bx/2, -by/2, -bx/2, by/2, 6)
